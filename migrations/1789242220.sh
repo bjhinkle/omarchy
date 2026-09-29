@@ -1,4 +1,4 @@
-echo "Keep Wi-Fi and USB-C working across suspend on 2016-2017 Touch Bar MacBook Pros"
+echo "Keep Wi-Fi and USB-C working across suspend on 2016-2017 MacBook Pros"
 
 # The install-time fix only reaches machines set up after it shipped. See
 # install/hardware/apple/fix-t1-suspend.sh and the two hooks it installs.

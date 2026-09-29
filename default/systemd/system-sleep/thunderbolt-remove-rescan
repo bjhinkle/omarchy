@@ -40,6 +40,15 @@
 #   sleep. Journal tag: thunderbolt-remove-rescan. Delete this file to undo.
 
 STATE=/run/thunderbolt-remove-rescan.roots
+# xHCI controllers in a full tree: the chipset's own plus one per Alpine Ridge
+# controller, so 2 on the two-port 13,1 and 14,1 and 3 on the four-port models.
+# A fixed number rather than the count at sleep entry, because a short sleep
+# can leave the tree dead going into the next one.
+if [[ $(cat /sys/class/dmi/id/product_name 2>/dev/null) =~ ^MacBookPro1[34],1$ ]]; then
+  XHCI_WANT=2
+else
+  XHCI_WANT=3
+fi
 log()  { logger -t thunderbolt-remove-rescan -- "$*"; }
 xhci() { ls /sys/bus/pci/drivers/xhci_hcd 2>/dev/null | grep -c '^0000'; }
 
@@ -132,8 +141,8 @@ case "$1" in
     ;;
   post)
     echo 1 > /sys/bus/pci/rescan 2>/dev/null || log "post/$2: WARNING rescan write failed"
-    for ((i = 0; i < 4; i++)); do (( $(xhci) >= 3 )) && break; sleep 0.5; done
-    if (( $(xhci) >= 3 )); then
+    for ((i = 0; i < 4; i++)); do (( $(xhci) >= XHCI_WANT )) && break; sleep 0.5; done
+    if (( $(xhci) >= XHCI_WANT )); then
       log "post/$2: tree back after attempt 1 (~$((i * 500)) ms): $(state)"
     else
       log "post/$2: attempt 1 short after 2 s: $(state) - retrying in a transient unit"
@@ -146,7 +155,7 @@ case "$1" in
       sleep 2
       echo 1 > /sys/bus/pci/rescan 2>/dev/null
       sleep 0.5
-      if (( $(xhci) >= 3 )); then log "post/$2: tree back after attempt $a: $(state)"; exit 0; fi
+      if (( $(xhci) >= XHCI_WANT )); then log "post/$2: tree back after attempt $a: $(state)"; exit 0; fi
       log "post/$2: attempt $a short: $(state)"
     done
     log "post/$2: WARNING tree NOT back after 6 attempts: $(state) - it returns after the next sleep of a few minutes"

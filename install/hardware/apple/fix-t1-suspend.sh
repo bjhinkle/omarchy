@@ -1,5 +1,5 @@
-# Keep Wi-Fi and USB-C working across suspend on the 2016-2017 Touch Bar
-# MacBook Pros (Apple T1 generation: Alpine Ridge Thunderbolt, BCM43602 Wi-Fi).
+# Keep Wi-Fi and USB-C working across suspend on the 2016-2017 MacBook Pros
+# (MacBookPro13,x and 14,x: Alpine Ridge Thunderbolt, Broadcom Wi-Fi).
 #
 # Two system-sleep hooks, both measured on a MacBookPro14,2:
 # - brcmfmac-reload: the BCM43602 firmware sometimes dies in S3 while its
