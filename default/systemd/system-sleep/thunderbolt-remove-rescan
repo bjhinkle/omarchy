@@ -23,9 +23,13 @@
 # Design:
 # - Upstream ports are found from the NHIs bound to the thunderbolt driver
 #   (NHI -> downstream port -> upstream port), never from fixed addresses.
-# - pre: sync first; a side with a mounted filesystem reached through its
-#   upstream port is NOT removed (it would be torn before the kernel's suspend
-#   sync) and gets the dead-until-later outcome instead of data loss.
+# - pre: a retry unit still running from the previous resume (see post) is
+#   stopped first. Otherwise its next rescan could bring back the tree that
+#   pre is about to remove, and that tree would then go into S3 live.
+# - pre: sync first. A side with a mounted filesystem or active swap reached
+#   through its upstream port is NOT removed (it would be torn before the
+#   kernel's suspend sync) and gets the dead-until-later outcome instead of
+#   data loss.
 # - pre: S3 wake is disabled on the PCIe root ports (they share one wake line;
 #   nothing on them needs to wake a laptop). Not restored: the sysfs flag only
 #   governs system sleep, runtime hot-plug keys on the wake capability, and a
@@ -36,10 +40,16 @@
 #   transient unit via systemd-run, because post hooks run while user.slice is
 #   frozen and a backgrounded subshell dies with the hook
 #   (systemd-suspend.service is Type=oneshot with KillMode=control-group).
-# - Acts on plain suspend only. Every path exits 0, so it can never block
-#   sleep. Journal tag: thunderbolt-remove-rescan. Delete this file to undo.
+# - Acts only on a plain suspend into S3: /sys/power/mem_sleep must select
+#   deep (systemd-sleep writes it before the hooks run). In s2idle the
+#   firmware does not cut the controllers' power, so removing the tree there
+#   would only drop attached devices, and post acts only if pre did.
+#   suspend-then-hibernate is not covered (Omarchy does not configure it).
+# - Every path exits 0, so it can never block sleep. Journal tag:
+#   thunderbolt-remove-rescan. Delete this file to undo.
 
 STATE=/run/thunderbolt-remove-rescan.roots
+ACTIVE=/run/thunderbolt-remove-rescan.active   # pre acted; post should too
 # xHCI controllers in a full tree: the chipset's own plus one per Alpine Ridge
 # controller, so 2 on the two-port 13,1 and 14,1 and 3 on the four-port models.
 # A fixed number rather than the count at sleep entry, because a short sleep
@@ -84,30 +94,50 @@ under_port() {
   done
   return 1
 }
-# Print the first mounted device reached through PCI device $1, if any.
+# Print the first mounted or swap device reached through PCI device $1, if any.
 mounted_under() {
   local dev b
   while read -r dev _; do
     [[ $dev == /dev/* ]] || continue
     b=$(readlink -f "$dev" 2>/dev/null) || continue
     under_port "${b##*/}" "$1" && { echo "$dev"; return 0; }
-  done < /proc/mounts
+  done < <(cat /proc/mounts /proc/swaps 2>/dev/null)
   return 1
 }
 
-if [[ $2 != suspend && $1 != retry ]]; then
-  exit 0
+if [[ $1 != retry ]]; then
+  [[ $2 == suspend ]] || exit 0
+  case "$1" in
+    pre)
+      rm -f "$ACTIVE"
+      mode=$(cat /sys/power/mem_sleep 2>/dev/null)
+      [[ $mode == *'[deep]'* ]] || { log "pre/$2: not S3 (mem_sleep: ${mode:-?}) - nothing to do"; exit 0; }
+      ;;
+    post)
+      [[ -f $ACTIVE ]] || exit 0
+      ;;
+  esac
 fi
 
 case "$1" in
   pre)
+    touch "$ACTIVE"
+    # A retry left from the last resume would rescan the tree back in after
+    # the removal below, so stop it first (see the header).
+    for unit in $(systemctl list-units --no-legend --plain 'thunderbolt-remove-rescan-retry-*' 2>/dev/null | awk '{print $1}'); do
+      if timeout 5 systemctl stop "$unit" 2>/dev/null; then
+        log "pre/$2: stopped pending retry $unit"
+      else
+        log "pre/$2: WARNING could not stop pending retry $unit"
+      fi
+    done
     sync
     thunderbolt_ports >"$STATE"
     n=0; skipped=0
     while read -r up rp; do
       [[ -n $up ]] || continue
       if m=$(mounted_under "$up"); then
-        log "pre/$2: WARNING $m is mounted through $(basename "$up") - NOT removing it (USB-C on that side stays down until a later sleep; no torn filesystem)"
+        log "pre/$2: WARNING $m is mounted or swapped on through $(basename "$up") - NOT removing it (USB-C on that side stays down until a later sleep; no torn filesystem)"
         skipped=$((skipped + 1)); continue
       fi
       if echo 1 > "$up/remove" 2>/dev/null; then
@@ -140,6 +170,7 @@ case "$1" in
     fi
     ;;
   post)
+    rm -f "$ACTIVE"
     echo 1 > /sys/bus/pci/rescan 2>/dev/null || log "post/$2: WARNING rescan write failed"
     for ((i = 0; i < 4; i++)); do (( $(xhci) >= XHCI_WANT )) && break; sleep 0.5; done
     if (( $(xhci) >= XHCI_WANT )); then
