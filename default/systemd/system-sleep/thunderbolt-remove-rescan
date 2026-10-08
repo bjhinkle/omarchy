@@ -40,11 +40,14 @@
 #   transient unit via systemd-run, because post hooks run while user.slice is
 #   frozen and a backgrounded subshell dies with the hook
 #   (systemd-suspend.service is Type=oneshot with KillMode=control-group).
-# - Acts only on a plain suspend into S3: /sys/power/mem_sleep must select
-#   deep (systemd-sleep writes it before the hooks run). In s2idle the
-#   firmware does not cut the controllers' power, so removing the tree there
-#   would only drop attached devices, and post acts only if pre did.
-#   suspend-then-hibernate is not covered (Omarchy does not configure it).
+# - Acts only on a plain suspend into S3: systemd-sleep must be about to
+#   write "mem" to /sys/power/state (see suspend_state below), and
+#   /sys/power/mem_sleep must select deep. systemd-sleep writes mem_sleep
+#   before the hooks run only when MemorySleepMode= is set, otherwise the
+#   kernel's own selection stands. In s2idle the firmware does not cut the
+#   controllers' power, so removing the tree there would only drop attached
+#   devices, and post acts only if pre did. suspend-then-hibernate is not
+#   covered (Omarchy does not configure it).
 # - Every path exits 0, so it can never block sleep. Journal tag:
 #   thunderbolt-remove-rescan. Delete this file to undo.
 
@@ -109,13 +112,36 @@ mounted_under() {
   return 1
 }
 
+# Print the state systemd-sleep will write to /sys/power/state for a suspend:
+# the first SuspendState= entry the kernel supports. As in systemd's parser,
+# entries accumulate across sleep.conf and its drop-ins, an empty assignment
+# resets the list, and an unset list means "mem standby freeze". Only "mem"
+# honors /sys/power/mem_sleep, so "freeze" is s2idle whatever mem_sleep shows.
+suspend_state() {
+  local want s
+  want=$(systemd-analyze cat-config systemd/sleep.conf 2>/dev/null | awk '
+    /^[[:space:]]*SuspendState[[:space:]]*=/ {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); gsub(/"/, "", v)
+      if (v ~ /^[[:space:]]*$/) s = ""; else s = s " " v
+    }
+    END { print s }')
+  for s in ${want:-mem standby freeze}; do
+    [[ " $(cat /sys/power/state 2>/dev/null) " == *" $s "* ]] && { echo "$s"; return 0; }
+  done
+  return 1
+}
+
 if [[ $1 != retry ]]; then
   [[ $2 == suspend ]] || exit 0
   case "$1" in
     pre)
       rm -f "$ACTIVE"
+      sleep_state=$(suspend_state)
       mode=$(cat /sys/power/mem_sleep 2>/dev/null)
-      [[ $mode == *'[deep]'* ]] || { log "pre/$2: not S3 (mem_sleep: ${mode:-?}) - nothing to do"; exit 0; }
+      if [[ $sleep_state != mem || $mode != *'[deep]'* ]]; then
+        log "pre/$2: not S3 (state: ${sleep_state:-?}, mem_sleep: ${mode:-?}) - nothing to do"
+        exit 0
+      fi
       ;;
     post)
       [[ -f $ACTIVE ]] || exit 0
