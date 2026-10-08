@@ -102,6 +102,10 @@ mounted_under() {
     b=$(readlink -f "$dev" 2>/dev/null) || continue
     under_port "${b##*/}" "$1" && { echo "$dev"; return 0; }
   done < <(cat /proc/mounts /proc/swaps 2>/dev/null)
+  # /proc/mounts names one member of a multi-device btrfs; sysfs lists them all.
+  for b in /sys/fs/btrfs/*/devices/*; do
+    [[ -e $b ]] && under_port "${b##*/}" "$1" && { echo "/dev/${b##*/}"; return 0; }
+  done
   return 1
 }
 
